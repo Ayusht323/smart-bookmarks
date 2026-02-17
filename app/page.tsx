@@ -1,65 +1,209 @@
-import Image from "next/image";
+'use client'
+
+import { useEffect, useState } from 'react'
+import { createClient } from '../utils/supabase/client'
+import { User, Session, AuthChangeEvent } from '@supabase/supabase-js'
+
+// Interface for our Bookmark
+type Bookmark = {
+  id: number
+  title: string
+  url: string
+  user_id: string
+}
 
 export default function Home() {
+  const supabase = createClient()
+  const [user, setUser] = useState<User | null>(null)
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([])
+  const [loading, setLoading] = useState(true)
+  const [title, setTitle] = useState('')
+  const [url, setUrl] = useState('')
+
+  // 1. Check Auth & Fetch Data
+  useEffect(() => {
+    const getUser = async () => {
+      const { data: { user } } = await supabase.auth.getUser()
+      setUser(user)
+      if (user) fetchBookmarks()
+      setLoading(false)
+    }
+
+    getUser()
+
+    // Listen for auth state changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      (_event: AuthChangeEvent, session: Session | null) => {
+        setUser(session?.user ?? null)
+        if (session?.user) fetchBookmarks()
+        else setBookmarks([])
+      }
+    )
+
+    return () => subscription.unsubscribe()
+  }, [])
+
+  // 2. Realtime Subscription
+  // 2. Realtime Subscription
+  useEffect(() => {
+    if (!user) return
+
+    const channel = supabase
+      .channel('realtime bookmarks')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'bookmarks' }, (payload) => {
+        if (payload.eventType === 'INSERT') {
+          const newBookmark = payload.new as Bookmark
+          setBookmarks((prev) => {
+            // ⚠️ FIX: Check if we already have this ID (from our optimistic update)
+            if (prev.some((b) => b.id === newBookmark.id)) {
+              return prev
+            }
+            return [newBookmark, ...prev]
+          })
+        } else if (payload.eventType === 'DELETE') {
+          setBookmarks((prev) => prev.filter((bookmark) => bookmark.id !== payload.old.id))
+        }
+      })
+      .subscribe()
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [user])
+
+  const fetchBookmarks = async () => {
+    const { data } = await supabase
+      .from('bookmarks')
+      .select('*')
+      .order('created_at', { ascending: false })
+    
+    if (data) setBookmarks(data as Bookmark[])
+  }
+
+  const handleLogin = async () => {
+    await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: `${location.origin}/auth/callback`,
+      },
+    })
+  }
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut()
+    setBookmarks([])
+    setUser(null)
+  }
+
+  const addBookmark = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!title || !url || !user) return
+
+    // 1. Insert and use .select() to get the new ID back immediately
+    const { data, error } = await supabase
+        .from('bookmarks')
+        .insert({ title, url, user_id: user.id })
+        .select() 
+
+    if (error) {
+      alert(error.message)
+    } else if (data) {
+      // 2. Optimistic Update: Add to list immediately!
+      const newBookmark = data[0] as Bookmark
+      setBookmarks((prev) => [newBookmark, ...prev])
+      
+      // Clear form
+      setTitle('')
+      setUrl('')
+    }
+  }
+
+  const deleteBookmark = async (id: number) => {
+    // 1. Optimistic Update: Remove from UI immediately!
+    setBookmarks((prev) => prev.filter((bookmark) => bookmark.id !== id))
+
+    // 2. Then send the delete request to Supabase
+    const { error } = await supabase.from('bookmarks').delete().eq('id', id)
+
+    // 3. If there was an error, alert the user (and maybe refresh the list)
+    if (error) {
+      alert('Error deleting bookmark: ' + error.message)
+      fetchBookmarks() // Revert changes if it failed
+    }
+  }
+
+  if (loading) return <div className="flex h-screen items-center justify-center">Loading...</div>
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+    <main className="min-h-screen bg-gray-50 p-8">
+      <div className="max-w-2xl mx-auto">
+        <h1 className="text-3xl font-bold text-gray-800 mb-8 text-center">Smart Bookmark App</h1>
+
+        {!user ? (
+          <div className="text-center">
+            <button
+              onClick={handleLogin}
+              className="bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-blue-700 transition"
             >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
-  );
+              Sign in with Google
+            </button>
+          </div>
+        ) : (
+          <div>
+            <div className="flex justify-between items-center mb-6">
+              <p className="text-gray-600">Welcome, {user.email}</p>
+              <button onClick={handleLogout} className="text-red-500 hover:text-red-700 text-sm">Sign Out</button>
+            </div>
+
+            {/* Add Bookmark Form */}
+            <form onSubmit={addBookmark} className="bg-white p-6 rounded-lg shadow-sm mb-8">
+              <div className="flex gap-4 flex-col sm:flex-row">
+                <input
+                  type="text"
+                  placeholder="Title (e.g., Google)"
+                  className="border p-2 rounded flex-1 text-black"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  required
+                />
+                <input
+                  type="url"
+                  placeholder="URL (https://...)"
+                  className="border p-2 rounded flex-1 text-black"
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  required
+                />
+                <button type="submit" className="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700">
+                  Add
+                </button>
+              </div>
+            </form>
+
+            {/* Bookmark List */}
+            <div className="space-y-4">
+              {bookmarks.length === 0 ? <p className="text-center text-gray-400">No bookmarks yet.</p> : null}
+              {bookmarks.map((bookmark) => (
+                <div key={bookmark.id} className="bg-white p-4 rounded-lg shadow-sm flex justify-between items-center border-l-4 border-blue-500">
+                  <div>
+                    <a href={bookmark.url} target="_blank" rel="noopener noreferrer" className="font-semibold text-lg hover:underline text-blue-900">
+                      {bookmark.title}
+                    </a>
+                    <p className="text-xs text-gray-400 truncate max-w-xs">{bookmark.url}</p>
+                  </div>
+                  <button
+                    onClick={() => deleteBookmark(bookmark.id)}
+                    className="text-gray-400 hover:text-red-600 ml-4"
+                    title="Delete"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </main>
+  )
 }
